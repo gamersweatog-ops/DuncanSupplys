@@ -1,0 +1,92 @@
+# ============================================================================
+#  Duncan Supply — the API, running on Render.
+#
+#  Render → New → Blueprint → pick this repo → Apply. Render reads this file,
+#  builds app.py and hands you https://duncan-supply-api.onrender.com. That
+#  origin is what goes into two places, and it must be the same in both:
+#
+#    1. the storefront's <meta name="ds-api-base"> tag
+#       (python tools/build_deploy.py --api-base https://duncan-supply-api.onrender.com)
+#    2. Stripe → Developers → Webhooks → https://duncan-supply-api.onrender.com/api/stripe/webhook
+#
+#  The page itself does NOT live here. It stays on Bluehost; this service only
+#  answers /api/*. Nothing in this file is secret — the secrets are `sync: false`
+#  and get typed into the Render dashboard, never committed.
+# ============================================================================
+
+services:
+  - type: web
+    name: duncan-supply-api          # → https://duncan-supply-api.onrender.com
+    runtime: python
+    plan: free                       # 0.1 CPU / 512 MB. Read the DATA_DIR note.
+    region: oregon
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    # One process, many threads. The shop keeps orders and accounts in JSON
+    # files, so a second gunicorn *worker* would be a second writer on the same
+    # files; gthread still serves a slow CJ call without blocking page loads.
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --worker-class gthread --workers 1 --threads 8 --timeout 60 --access-logfile -
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      # ── build ───────────────────────────────────────────────────────────
+      - key: PYTHON_VERSION
+        value: "3.12.6"              # the version the test suite passes on
+      - key: PYTHONUNBUFFERED
+        value: "1"                   # so log() lines appear as they happen
+
+      # ── secrets ─────────────────────────────────────────────────────────
+      # Render prompts for these on first Apply, then keeps them encrypted.
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: CJ_API_KEY
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true          # signs shoppers in; Render invents it
+
+      # ── the page's origin vs the API's origin ───────────────────────────
+      # These are separate on purpose: Stripe sends the *shopper's browser* to
+      # PUBLIC_BASE_URL, but the *webhook* has to reach API_BASE_URL.
+      - key: PUBLIC_BASE_URL
+        value: https://www.duncansupplys.store
+      - key: API_BASE_URL
+        value: https://duncan-supply-api.onrender.com
+      - key: ALLOWED_ORIGINS
+        value: https://www.duncansupplys.store,https://duncansupplys.store
+
+      # ── shop rules (mirrors the local .env) ─────────────────────────────
+      - key: CURRENCY
+        value: usd
+      - key: SHIP_COUNTRIES
+        value: US,CA,GB,AU,NZ
+
+      # ── CJdropshipping ──────────────────────────────────────────────────
+      - key: CJ_MODE
+        value: create                # create = drafts really go to CJ. "mock" sends nothing.
+      - key: CJ_IS_SANDBOX
+        value: "1"                   # 1 = CJ flags them as test orders. Flip to "0" to go live.
+      - key: CJ_LOGISTIC_NAME
+        value: CJPacket Ordinary
+      - key: CJ_FROM_COUNTRY_CODE
+        value: CN
+      - key: CJ_WAREHOUSE_COUNTRY
+        value: CN
+
+      # ── admin ───────────────────────────────────────────────────────────
+      # Leave this off on a public host: with it on and no ADMIN_TOKEN, anyone
+      # on the internet can POST /api/retry — which creates real orders at CJ —
+      # and POST /api/stock.
+      - key: ALLOW_INSECURE_ADMIN
+        value: "0"
+      - key: FIRST_ACCOUNT_IS_OWNER
+        value: "1"                   # your first signup becomes the owner
+
+      # ── data ────────────────────────────────────────────────────────────
+      # Render's free filesystem is EPHEMERAL. Orders, shopper accounts, live
+      # site edits and analytics are wiped on every redeploy and on every
+      # spin-down (free instances sleep after 15 minutes idle). A persistent
+      # disk needs a paid instance — see DEPLOY.md.
+      - key: DATA_DIR
+        value: /tmp/duncan-supply
